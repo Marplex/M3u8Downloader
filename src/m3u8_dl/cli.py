@@ -26,7 +26,7 @@ def _show_progress_bar(downloaded, total):
           + '#' * hashtags + ' ' * (htlen - hashtags) +
           '|' +
           '  {0}/{1} '.format(downloaded, total) +
-          ' {:.1f}'.format(percent).ljust(5) + ' %', end='\r', flush=True)  # noqa
+          ' {:.1f}'.format(percent).ljust(5) + ' %')  # noqa
 
 
 def execute(restore, context):

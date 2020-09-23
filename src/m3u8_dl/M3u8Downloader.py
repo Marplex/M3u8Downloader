@@ -49,7 +49,7 @@ def download_file(fileurl, headers, filename, check=None, verify=True, decrypt_k
             print(r.content)
             raise DownloadFileNotValidException()
         with open(filename, 'wb') as f:
-            data = ''
+            data = bytes()
             for chunk in r.iter_content(chunk_size=8192):
                 if decrypt_key is None:
                     f.write(chunk)
@@ -69,23 +69,6 @@ class M3u8File:
         self.finished = finished
         self.sslverify = sslverify
         self.m3u8filecontent = None
-
-    def get_key(self):
-        if self.m3u8filecontent is not None:
-            result = re.findall('#EXT-X-KEY:METHOD=AES-128,URI="(.*)"', self.m3u8filecontent)
-            if not result:
-                return None
-            else:
-                key_url = result[0][0]
-                key_iv = re.findall('#EXT-X-MEDIA-SEQUENCE:(.*)')[0][0].decode('hex')
-
-                data = ''
-                for chunk in requests.get(key_url, stream=True):
-                    data += chunk
-
-                return data, key_iv
-        else:
-            raise Exception("No m3u8 file found")
         
 
     def get_file(self):
@@ -95,23 +78,36 @@ class M3u8File:
             if not self.finished:
                 download_file(self.fileurl, self.headers,
                               self.output_file, verify=self.sslverify)
-
-                with open(self.output_file, 'r') as f:
-                    self.m3u8filecontent = f.read()
-                
         elif parsed_url.scheme == "file":
-            with open(parsed_url.path, 'r') as f:
-                self.m3u8filecontent = f.read()
             shutil.copy(parsed_url.path, self.output_file)
         else:
             raise Exception("Unspported url scheme")
 
     def parse_file(self):
         self.m3u8_obj = m3u8.load(self.output_file)
+        for key in self.m3u8_obj.keys:
+            if key:
+                data = bytes()
+                for chunk in requests.get(key.uri, stream=True):
+                    data += chunk
+
+                self.decrypt_key = data
+
+                if key.iv is None:
+                    self.decrypt_iv = self.m3u8_obj.media_sequence.to_bytes(16, 'little')
+                else:
+                    self.decrypt_iv = key.iv
+
         return self.m3u8_obj
 
     def get_tssegments(self):
         return self.m3u8_obj.data['segments']
+
+    def get_decrypt_key(self):
+        return self.decrypt_key
+
+    def get_decrypt_iv(self):
+        return self.decrypt_iv
 
     @staticmethod
     def get_path_by_url(url, folder):
@@ -140,13 +136,13 @@ class TsFile():
 
     def get_file(self):
         download_file(self.fileurl, self.headers, self.output_file,
-                      self.check_valid, self.sslverify, self.decrypt_key)
+                      self.check_valid, self.sslverify, self.decrypt_key, self.decrypt_iv)
         self.finished = True
 
 
 class M3u8Context(object):
     rendering_attrs = ['file_url', 'base_url', 'referer', 'threads', 'output_file', 'sslverify',
-                       'get_m3u8file_complete', 'downloaded_ts_urls', 'decrypt_key']
+                       'get_m3u8file_complete', 'downloaded_ts_urls']
 
     def __init__(self, **kwargs):
         self._container = {}
@@ -206,12 +202,14 @@ class M3u8Downloader:
                                  self.m3u8_filename, self.sslverify,
                                  self.context['get_m3u8file_complete'])
         self.m3u8file.get_file()
-        self.context['decrypt_key'], self.context['decrypt_iv'] = self.m3u8file.get_key()
         self.context['get_m3u8file_complete'] = True
 
     @monitor_proc('parse m3u8 file')
     def parse_m3u8file(self):
         self.m3u8file.parse_file()
+        self.decrypt_key = self.m3u8file.get_decrypt_key()
+        self.decrypt_iv = self.m3u8file.get_decrypt_iv()
+
         self.tssegments = self.m3u8file.get_tssegments()
         self.__all_tsseg_len = len(self.tssegments)
         if len(self.tssegments) == 0:
@@ -260,7 +258,7 @@ class M3u8Downloader:
             outfile = M3u8File.get_path_by_url(uri,
                                                self.ts_tmpfolder)
             url = urljoin(self.base_url, uri)
-            tsfile = TsFile(url, self.headers, outfile, index, self.sslverify, self.context['decrypt_key'], self.context['decrypt_iv'])
+            tsfile = TsFile(url, self.headers, outfile, index, self.sslverify, self.decrypt_key, self.decrypt_iv)
 
 
             if not uri in dd_ts:
@@ -283,8 +281,11 @@ class M3u8Downloader:
         # reorder
         self.tsfiles.sort(key=lambda x: x.index)
         with open(self.output_file, 'wb') as merged:
+            index = 1
             for tsfile in self.tsfiles:
-                print(tsfile.output_file)
+                self.on_progress(index, self.__all_tsseg_len)
+                index += 1
+                
                 with open(tsfile.output_file, 'rb') as mergefile:
                     shutil.copyfileobj(mergefile, merged)
 
